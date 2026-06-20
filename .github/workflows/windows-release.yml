@@ -1,0 +1,84 @@
+name: Release Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0"
+        required: true
+        type: string
+
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows-exe:
+    name: Build and release Windows executable
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set release tag
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "RELEASE_TAG=${{ inputs.tag }}" >> $env:GITHUB_ENV
+          } else {
+            "RELEASE_TAG=${{ github.ref_name }}" >> $env:GITHUB_ENV
+          }
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --windowed `
+            --name SongEternal `
+            --collect-all librosa `
+            --collect-all sounddevice `
+            main.py
+
+      - name: Package release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist\SongEternal.exe package\
+
+          if (Test-Path README.md) {
+            Copy-Item README.md package\
+          }
+
+          Compress-Archive -Path package\* -DestinationPath SongEternal-windows.zip -Force
+
+      - name: Create GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:RELEASE_TAG `
+            dist\SongEternal.exe `
+            SongEternal-windows.zip `
+            --title "SongEternal $env:RELEASE_TAG" `
+            --generate-notes
