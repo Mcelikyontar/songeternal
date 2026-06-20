@@ -3,6 +3,12 @@
 A small Python app that analyzes a local audio file and extends playback using
 Eternal Jukebox-style beat jumps.
 
+EternalJukebox reference project: https://github.com/EternalBox/EternalJukebox
+
+Song Eternal can be used as a song extender, MP3 extender, or music loop
+generator for making a track play much longer while still following the
+original song structure.
+
 The app detects beats, extracts per-beat audio features, finds similar beats,
 and streams the song beat by beat. As playback continues, it occasionally jumps
 to a similar beat instead of continuing linearly. If playback eventually reaches
@@ -102,4 +108,3 @@ provided to ChatGPT as reference material while developing this version.
 
 EternalJukebox is licensed under the MIT License. See
 `THIRD_PARTY_NOTICES.md` for the EternalJukebox copyright and license notice.
-
