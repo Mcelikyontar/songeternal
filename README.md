@@ -103,14 +103,3 @@ provided to ChatGPT as reference material while developing this version.
 EternalJukebox is licensed under the MIT License. See
 `THIRD_PARTY_NOTICES.md` for the EternalJukebox copyright and license notice.
 
-## Before Sharing Online
-
-The app does not use `.venv`, `.idea`, `__pycache__`, or
-`old_EternalJukebox-master` at runtime, so they can be left out of the published
-repo. If any code or assets from Eternal Jukebox remain in this project, keep
-`THIRD_PARTY_NOTICES.md` with the published repo.
-
-Consider leaving local audio files and `ffmpeg.exe` out of the repo. Audio files
-may have copyright/licensing restrictions, and `ffmpeg.exe` is large enough that
-most users should install `ffmpeg` separately or place it next to `main.py`
-locally.
