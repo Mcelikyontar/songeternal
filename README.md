@@ -88,8 +88,7 @@ The default settings are tuned for more natural jumps:
 - same-bar-position jumps
 - similar beat volume levels
 - about 10 total branches per minute by default
-- less-used branches are favored during playback
-- branch usage counts normalize once every route has enough shared usage
+- global branch balancing keeps generated routes close in use count
 - branch chance ramps to 100% near the final available branch points
 - nearby branches with the same jump offset are collapsed into one route
 - hard beat-boundary jumps with no crossfade

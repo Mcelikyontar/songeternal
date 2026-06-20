@@ -90,7 +90,7 @@ DEFAULT_MAX_BRANCHES_PER_MINUTE = 10.0
 NEARBY_BRANCH_WINDOW_BEATS = 8
 BRANCH_OFFSET_TOLERANCE_BEATS = 1
 UNUSED_BRANCH_CHANCE_MULTIPLIER = 1.35
-BRANCH_USAGE_NORMALIZE_THRESHOLD = 5
+BRANCH_CATCH_UP_CHANCE = 1.0
 END_BRANCH_BOOST_WINDOW_BEATS = 32
 END_BRANCH_FORCE_WINDOW_BEATS = 8
 END_BRANCH_MAX_CHANCE = 1.0
@@ -279,7 +279,6 @@ class EternalPlayer:
                     if jump_from is not None:
                         route = (jump_from, jump.dest)
                         self._branch_use_counts[route] = self._branch_use_counts.get(route, 0) + 1
-                        self._normalize_branch_usage_counts()
                 self._transition = self._plan_transition()
                 ended = False
 
@@ -352,12 +351,13 @@ class EternalPlayer:
         return self._branch_chance
 
     def _choose_weighted_branch(self, source_index: int, branches: deque[Branch]) -> Branch | None:
-        if not branches:
+        candidates = self._eligible_branches(source_index, branches)
+        if not candidates:
             return None
 
         weighted_branches = [
-            (branch, 1.0 / (self._route_use_count(source_index, branch.dest) + 1.0))
-            for branch in branches
+            (branch, self._branch_selection_weight(source_index, branch))
+            for branch in candidates
         ]
         total_weight = sum(weight for _branch, weight in weighted_branches)
         target = random.random() * total_weight
@@ -370,27 +370,100 @@ class EternalPlayer:
 
     def _least_used_branch(self, source_index: int) -> Branch | None:
         branches = self.analysis.beats[source_index].branches
-        if not branches:
+        candidates = self._eligible_branches(source_index, branches)
+        if not candidates:
             return None
         return min(
-            branches,
+            candidates,
             key=lambda branch: (self._route_use_count(source_index, branch.dest), branch.distance),
         )
 
     def _adjusted_branch_chance(self, base_chance: float, source_index: int, branch: Branch | None) -> float:
         if branch is None:
             return 0.0
+        minimum_usage, maximum_usage = self._branch_usage_bounds()
+        route_usage = self._route_use_count(source_index, branch.dest)
+        if maximum_usage > minimum_usage:
+            if route_usage > minimum_usage:
+                return 0.0
+            return BRANCH_CATCH_UP_CHANCE
         if self._is_forced_end_branch(source_index):
             return 1.0
 
         usage_multiplier = UNUSED_BRANCH_CHANCE_MULTIPLIER / math.sqrt(
-            self._route_use_count(source_index, branch.dest) + 1.0
+            route_usage - minimum_usage + 1.0
         )
         chance = base_chance * usage_multiplier
         end_pressure = self._end_branch_pressure(source_index)
         if end_pressure > 0.0:
             chance += (END_BRANCH_MAX_CHANCE - chance) * end_pressure
         return min(END_BRANCH_MAX_CHANCE, max(0.0, chance))
+
+    def _eligible_branches(self, source_index: int, branches: deque[Branch]) -> list[Branch]:
+        if not branches:
+            return []
+        minimum_usage, maximum_usage = self._branch_usage_bounds()
+        if maximum_usage <= minimum_usage:
+            return list(branches)
+        return [
+            branch
+            for branch in branches
+            if self._route_use_count(source_index, branch.dest) == minimum_usage
+        ]
+
+    def _branch_selection_weight(self, source_index: int, branch: Branch) -> float:
+        minimum_usage, _maximum_usage = self._branch_usage_bounds()
+        relative_usage = max(0, self._route_use_count(source_index, branch.dest) - minimum_usage)
+        return 1.0 / (relative_usage + 1.0)
+
+    def _branch_usage_bounds(self) -> tuple[int, int]:
+        if not self._branch_routes:
+            return 0, 0
+        usages = [
+            self._route_use_count(source_index, dest_index)
+            for source_index, dest_index in self._branch_routes
+        ]
+        return min(usages), max(usages)
+
+    def _route_chance_if_source_reached(self, base_chance: float, source_index: int, branch: Branch) -> float:
+        branches = self.analysis.beats[source_index].branches
+        candidates = self._eligible_branches(source_index, branches)
+        if not candidates:
+            return 0.0
+
+        branch_weight = 0.0
+        total_weight = 0.0
+        for candidate in candidates:
+            weight = self._branch_selection_weight(source_index, candidate)
+            total_weight += weight
+            if candidate.dest == branch.dest:
+                branch_weight = weight
+
+        if branch_weight <= 0.0 or total_weight <= 0.0:
+            return 0.0
+        return (branch_weight / total_weight) * self._adjusted_branch_chance(base_chance, source_index, branch)
+
+    def _route_balance_state(self, source_index: int, dest_index: int) -> str:
+        minimum_usage, maximum_usage = self._branch_usage_bounds()
+        if maximum_usage <= minimum_usage:
+            return "balanced"
+        if self._route_use_count(source_index, dest_index) == minimum_usage:
+            return "catch-up"
+        return "waiting"
+
+    def branch_route_snapshot(self) -> dict[tuple[int, int], tuple[int, float, str]]:
+        with self._lock:
+            base_chance = min(self.max_branch_chance, self._branch_chance + self.branch_chance_delta)
+            snapshot: dict[tuple[int, int], tuple[int, float, str]] = {}
+            for beat in self.analysis.beats:
+                for branch in beat.branches:
+                    route = (beat.index, branch.dest)
+                    snapshot[route] = (
+                        self._route_use_count(beat.index, branch.dest),
+                        self._route_chance_if_source_reached(base_chance, beat.index, branch),
+                        self._route_balance_state(beat.index, branch.dest),
+                    )
+            return snapshot
 
     def _route_use_count(self, source_index: int, dest_index: int) -> int:
         return self._branch_use_counts.get((source_index, dest_index), 0)
@@ -400,21 +473,6 @@ class EternalPlayer:
             return True
         played_seconds = self._played_samples / self.analysis.sample_rate
         return played_seconds < self.timed_end_seconds
-
-    def _normalize_branch_usage_counts(self) -> None:
-        if not self._branch_routes:
-            return
-
-        minimum_usage = min(self._route_use_count(source_index, dest_index) for source_index, dest_index in self._branch_routes)
-        if minimum_usage < BRANCH_USAGE_NORMALIZE_THRESHOLD:
-            return
-
-        for route in list(self._branch_use_counts):
-            normalized_count = self._branch_use_counts[route] - minimum_usage
-            if normalized_count > 0:
-                self._branch_use_counts[route] = normalized_count
-            else:
-                del self._branch_use_counts[route]
 
     def _end_branch_pressure(self, source_index: int) -> float:
         if self._last_branch_source_index is None:
@@ -1050,6 +1108,8 @@ class EternalJukeboxApp:
                         branch.dest - beat.index,
                         branch.distance,
                         loudness_diff,
+                        beat.index,
+                        branch.dest,
                     )
                 )
 
@@ -1059,8 +1119,8 @@ class EternalJukeboxApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Branches ({len(rows)})")
-        dialog.geometry("760x430")
-        dialog.minsize(640, 320)
+        dialog.geometry("940x430")
+        dialog.minsize(820, 320)
         dialog.transient(self.root)
 
         frame = ttk.Frame(dialog, padding=12)
@@ -1068,7 +1128,19 @@ class EternalJukeboxApp:
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        columns = ("number", "source", "dest", "source_time", "dest_time", "offset", "distance", "loudness")
+        columns = (
+            "number",
+            "source",
+            "dest",
+            "source_time",
+            "dest_time",
+            "offset",
+            "distance",
+            "loudness",
+            "uses",
+            "chance",
+            "state",
+        )
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         tree.grid(row=0, column=0, sticky="nsew")
 
@@ -1081,6 +1153,9 @@ class EternalJukeboxApp:
             "offset": "Offset",
             "distance": "Distance",
             "loudness": "Loudness dB",
+            "uses": "Uses",
+            "chance": "Live chance",
+            "state": "State",
         }
         widths = {
             "number": 54,
@@ -1091,14 +1166,30 @@ class EternalJukeboxApp:
             "offset": 72,
             "distance": 86,
             "loudness": 92,
+            "uses": 58,
+            "chance": 92,
+            "state": 78,
         }
         for column in columns:
             tree.heading(column, text=headings[column])
-            tree.column(column, width=widths[column], anchor=tk.E, stretch=column in {"distance", "loudness"})
+            anchor = tk.W if column == "state" else tk.E
+            tree.column(column, width=widths[column], anchor=anchor, stretch=column in {"distance", "loudness"})
 
+        route_rows: list[tuple[str, int, int]] = []
         for row in rows:
-            number, source, dest, source_time, dest_time, offset, distance, loudness_diff = row
-            tree.insert(
+            (
+                number,
+                source,
+                dest,
+                source_time,
+                dest_time,
+                offset,
+                distance,
+                loudness_diff,
+                source_index,
+                dest_index,
+            ) = row
+            item_id = tree.insert(
                 "",
                 tk.END,
                 values=(
@@ -1110,8 +1201,12 @@ class EternalJukeboxApp:
                     offset,
                     f"{distance:.3f}",
                     f"{loudness_diff:.1f}",
+                    "-",
+                    "-",
+                    "-",
                 ),
             )
+            route_rows.append((item_id, source_index, dest_index))
 
         scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -1120,6 +1215,19 @@ class EternalJukeboxApp:
         summary = ttk.Label(frame, text=f"{len(rows)} branches across {len(self.analysis.beats)} beats")
         summary.grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Button(frame, text="Close", command=dialog.destroy).grid(row=1, column=0, sticky=tk.E, pady=(8, 0))
+
+        def refresh_live_branch_values() -> None:
+            if not dialog.winfo_exists():
+                return
+            snapshot = self.player.branch_route_snapshot() if self.player is not None else {}
+            for item_id, source_index, dest_index in route_rows:
+                uses, chance, state = snapshot.get((source_index, dest_index), (0, 0.0, "-"))
+                tree.set(item_id, "uses", uses if self.player is not None else "-")
+                tree.set(item_id, "chance", f"{chance * 100:.1f}%" if self.player is not None else "-")
+                tree.set(item_id, "state", state if self.player is not None else "-")
+            dialog.after(500, refresh_live_branch_values)
+
+        refresh_live_branch_values()
 
     def _refresh_analysis_stats(self) -> tuple[int, float]:
         if self.analysis is None:
