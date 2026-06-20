@@ -1,0 +1,20 @@
+# Python caches and virtual environments
+.venv/
+__pycache__/
+*.py[cod]
+
+# Local editor/project metadata
+.idea/
+
+# Local audio files and generated exports
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+
+# Local binary tools
+ffmpeg.exe
+
+# Legacy source snapshot
+old_EternalJukebox-master/
